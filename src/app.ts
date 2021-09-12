@@ -1,21 +1,19 @@
 import { CrawlerCoordinator } from "./libs/crawlerCoordinator";
-import { parse } from "node-html-parser";
-
-// const text = `<body>
-// <a href="https://naver.com">hello</a>
-// <div>sdfdsfsf</div>
-// <a href="https://kakao.com">world</a>
-// </body>`;
-
-// const matched = text.match(/<a\s+(?:[^>]*?\s+)?href=(["'])(.*?)\1>/i);
-// console.log(matched);
-// const multipleMatched = text.match(/<a\s+(?:[^>]*?\s+)?href=(["'])(.*?)\1>/g);
-// console.log(multipleMatched);
-
-// const html = parse(text);
-// console.log(html.querySelector("a"));
+import { initialize } from "koalanlp/Util";
+import database from "./config/database";
 
 (async () => {
+    database.sync({
+        alter: true,
+    });
+
+    // 형태소분석기 시작할때 한번 초기화 
+    await initialize({
+        packages: { KMR: "2.0.4", KKMA: "2.0.4" },
+        verbose: true,
+    });
+
+    //coordinator 하나만 만듬 
     const coordinator = new CrawlerCoordinator();
     coordinator.reportUrl("http://news.naver.com");
     await coordinator.start();

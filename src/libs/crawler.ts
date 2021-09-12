@@ -1,17 +1,20 @@
-import axios, { AxiosError } from "axios";
+//import axios, { AxiosError } from "axios";
 import { CrawlerCoordinator } from "./crawlerCoordinator";
 import { parse } from "node-html-parser";
-import iconv from "iconv-lite";
+// import iconv from "iconv-lite";
 import chardet from "chardet";
-import { Script } from "vm";
+// import { Script } from "vm";
 import { KMR } from "koalanlp/API";
 import { Tagger } from "koalanlp/proc";
-import { initialize } from "koalanlp/Util";
+import { Keyword } from "../models/Keyword";
+import { Link } from "../models/Link";
+import { KeywordLink } from "../models/KeywordLink";
+// import { initialize } from "koalanlp/Util";
 
 export class Crawler {
     private url: string;
-    private content?: Buffer;   //js 바이트배열을 묶어서 관리하는 객체 buffer
-    private encoding?: string;
+    private content?: string;   //js 바이트배열을 묶어서 관리하는 객체 buffer
+    //  private encoding?: string;
     private coordinator: CrawlerCoordinator;
     private host?: string;
 
@@ -21,27 +24,21 @@ export class Crawler {
     }
 
     //처리되면 문자열 or null을 줌
-    private async fetch(): Promise<Buffer | null> {
-        try {
-            const { data, request } = await axios.get(this.url, {
-                timeout: 3000,  //시간제한 3초
-                responseType: "arraybuffer", //바이트 배열을 받음
-            });
-            this.host = request.host;
-            const detectEncoding = this.detectEncoding(data);
-            if (!detectEncoding) {
-                return null;
-            }
-            this.encoding = detectEncoding; //encoding에 넣어주기
-            return data; //html로 받아서 data는 string
+    private async fetch(): Promise<string | null> {
+        //코디네이터에 있던 브라우저를 통해 getInstance
+        const browser = await this.coordinator.getBrowser().getInstance();
+        if (!browser) {
+            return null;
         }
-        catch (error) {
-            //response에 값이 있고 에러뜨면 status코드 띄움 
-            if (error.isAxiosError) {
-                const e: AxiosError = error;
-                console.log(e.response?.status);
-            }
+        const page = await browser.newPage();//페이지띄우기
+        await page.goto(this.url);//그리고 this.url로 이동
+        const result = await page.content();//페이지 로딩될때까지 기달리고 띄우기
+
+        if (result) {
+            this.content = result;
+            return this.content;
         }
+
         return null;
     }
 
@@ -64,16 +61,12 @@ export class Crawler {
 
     //anchors테이블에 a tag에서 href속성값(링크) 빼오기
     private async parseContent(): Promise<void> {
-        if (!this.content || !this.encoding) {
+        if (!this.content) {
             return;
         }
-        const encodedContent = iconv.decode(this.content, this.encoding);
-        const html = parse(encodedContent);
-        //script태그 지우기
-        const scripts = html.querySelectorAll("script");
-        scripts.forEach(tmp => tmp.remove());
-        //a tag찾기
-        const anchors = html.querySelectorAll("a");
+        const html = parse(this.content).querySelector("body");//body태그
+        const anchors = html.querySelectorAll("a");//a태그
+
         anchors.forEach((anchor) => {
             const href = anchor.getAttribute('href');//href속성값 
             if (!href) {
@@ -88,7 +81,7 @@ export class Crawler {
             }
 
             let url = matched[0];
-
+            //상대경로 처리
             if (url.startsWith("/")) url = this.host + url;
             else if (!href.startsWith("http")) url = this.host + "/" + url;
 
@@ -97,24 +90,84 @@ export class Crawler {
         html.querySelectorAll("script").forEach((script) => script.remove());
 
         const text = html.text.replace(/\s{2,}/g, " ");
-        await this.parseKeywords(text);
+        await this.parseKeywords(text);//형태소분석
     }
 
     private async parseKeywords(text: string) {
-        await initialize({
-            packages: { KMR: "2.0.4", KKMA: "2.0.4" },
-            verbose: true,
-        });
-
         const tagger = new Tagger(KMR);
         const tagged = await tagger(text);
+        const newKeywords: Set<string> = new Set();
+        const existKeywords: Keyword[] = [];
+
         for (const sent of tagged) {
             for (const word of sent._items) {
-                for (const morpheme of word._itmes) {
+                for (const morpheme of word._items) {
                     const t = morpheme._tag;
-                    if (t === "NNG" || t === "VV" || t === "MM") {
-                        console.log(morpheme.toString());
+                    //nng 명사 찾기 등..
+                    if (t === "NNG" || t === "NNP" || t === "NNB" ||
+                        t === "NP" || t === "NR" || t === "VV" || t === "SL") {
+                        const keyword = morpheme._surface.toLowerCase();
+                        const exist = await Keyword.findOne({//찾고 
+                            where: {
+                                name: keyword,
+                            },
+                        });
+                        if (!exist) {//없으면 추가
+                            newKeywords.add(keyword);
+                        } else {
+                            existKeywords.push(exist);
+                        }
                     }
+                    //      {
+                    //     //검색 후 조건에 맞는게 없으면 추가
+                    //     const exist = await Keyword.findOne({
+                    //         where: {
+                    //             name: morpheme._surface,
+                    //         },
+                    //     });
+                    //     if (!exist) {
+                    //         await Keyword.create({
+                    //             name: morpheme._surface,
+                    //         });
+                    //     }
+                    // }
+                    // try {    //중복처리
+                    //     await Keyword.create({
+                    //         name: morpheme._surface,
+                    //     });
+                    // }
+                    // catch (e) {
+                    //     console.log("duplicated or error occurred", e);
+                    // }
+
+                }
+            }
+        }
+        let newLink;
+        if (newKeywords.size > 0) {//데이터가 있으면
+            const keywords = Array.from(newKeywords).map((keyword) => {
+                return { name: keyword };
+            });
+            newLink = await Link.create(//링크를만들고
+                {
+                    url: this.url,
+                    description: text.slice(0, 512),
+                    keywords: keywords,//키워드만들고
+                },
+                {
+                    include: [Keyword],
+                }
+            );
+        }
+        if (newLink) {
+            const addedIds: Set<bigint> = new Set();
+            for (const keyword of existKeywords) {
+                if (!addedIds.has(keyword.id)) {//관계를 만들어주기
+                    await KeywordLink.create({
+                        keywordId: keyword.id,
+                        linkId: newLink.id,
+                    });
+                    addedIds.add(keyword.id);
                 }
             }
         }
